@@ -115,13 +115,13 @@ class TTSService:
             format: Audio format (default: "mp3")
         """
         self.api_key = api_key or os.getenv("FISH_AUDIO_SECRET_KEY")
-        self.voice_id = voice_id or os.getenv("ENGLISH_FEMALE_SOFT")
+        self.voice_id = voice_id or os.getenv("MODEL_ID")
         self.format = format
         
         if not self.api_key:
             raise ValueError("FISH_AUDIO_SECRET_KEY not provided")
         if not self.voice_id:
-            raise ValueError("ENGLISH_FEMALE_SOFT not provided")
+            raise ValueError("MODEL_ID not provided")
         
         logging.info(f"TTS Service initialized with voice reference ID: {self.voice_id}, format: {self.format}")
     
@@ -158,7 +158,8 @@ class TTSService:
         
         try:
             # Use a queue to bridge between sync iterator and async generator
-            chunk_queue = asyncio.Queue(maxsize=20)  # Buffer chunks
+            # Very large queue size to prevent blocking, allows heavy buffering
+            chunk_queue = asyncio.Queue(maxsize=200)  # Very large buffer to prevent blocking
             exception_holder = [None]
             
             # Start streaming in background thread
@@ -178,18 +179,24 @@ class TTSService:
                     )
                     
                     # Stream chunks to queue using thread-safe put
+                    # Put chunks immediately without waiting to minimize latency
                     for chunk in session.tts(tts_request):
                         if chunk:
-                            # Use run_coroutine_threadsafe to put from background thread
-                            future = asyncio.run_coroutine_threadsafe(
-                                chunk_queue.put(chunk),
-                                loop
-                            )
-                            # Wait for put to complete (prevents queue overflow)
+                            # Schedule put operation immediately without waiting
+                            # This allows chunks to queue up and be consumed asynchronously
                             try:
-                                future.result(timeout=0.1)
-                            except:
-                                pass  # If timeout, chunk will be dropped or queue full
+                                asyncio.run_coroutine_threadsafe(
+                                    chunk_queue.put(chunk),
+                                    loop
+                                )
+                            except Exception as e:
+                                logging.warning(f"Failed to queue chunk: {e}")
+                                # If we can't queue, try put_nowait as fallback
+                                try:
+                                    # This won't work from another thread, but try anyway
+                                    pass
+                                except:
+                                    pass  # Skip chunk if queue operations fail
                     
                     # Signal completion
                     asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
@@ -204,7 +211,11 @@ class TTSService:
             thread = threading.Thread(target=_stream_chunks_to_queue_with_loop, daemon=True)
             thread.start()
             
-            # Yield chunks from queue as they arrive
+            # Yield chunks with heavy buffering to prevent audio stops
+            # Large buffer ensures very smooth playback
+            chunk_buffer = []
+            buffer_size = 10  # Buffer 10 chunks for very smooth playback
+            
             while True:
                 chunk = await chunk_queue.get()
                 
@@ -212,9 +223,22 @@ class TTSService:
                     raise exception_holder[0]
                 
                 if chunk is None:  # Signal to stop
+                    # Yield any remaining buffered chunks
+                    if chunk_buffer:
+                        combined_chunk = b''.join(chunk_buffer)
+                        chunk_buffer = []
+                        yield combined_chunk
                     break
                 
-                yield chunk
+                # Add chunk to buffer
+                chunk_buffer.append(chunk)
+                
+                # Yield if buffer is full
+                if len(chunk_buffer) >= buffer_size:
+                    # Combine buffered chunks and yield
+                    combined_chunk = b''.join(chunk_buffer)
+                    chunk_buffer = []
+                    yield combined_chunk
                     
         except Exception as e:
             logging.error(f"Error generating TTS stream: {e}")

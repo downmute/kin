@@ -163,39 +163,80 @@ async def chat(
         
         logger.info(f"Transcription: '{transcribed_text[:50]}...'")
         
-        # Step 2: Get LLM response
-        logger.info("Getting LLM response...")
-        text_response = await llm_service.get_full_response(
-            text=transcribed_text,
-            persona=persona,
-            backstory=backstory,
-            max_tokens=max_tokens or 150
-        )
+        # Step 2 & 3: Stream LLM response and convert to audio in real-time
+        # This allows audio to start playing as soon as first text chunk arrives
+        logger.info("Streaming LLM response and generating TTS audio...")
         
-        logger.info(f"LLM response received: '{text_response[:50]}...'")
-        
-        # Step 3: Generate TTS audio (streaming)
-        logger.info("Generating TTS audio...")
+        # Collect full text for headers (will be available at end)
+        full_text_response = ""
+        text_buffer = ""  # Buffer text chunks for TTS
         
         async def generate_audio_stream():
-            """Generate audio stream chunks."""
+            """Generate audio stream by streaming LLM text and converting to audio immediately."""
+            nonlocal full_text_response, text_buffer
+            
             try:
-                async for audio_chunk in tts_service.generate_audio_stream(text_response):
-                    yield audio_chunk
+                # Stream LLM text chunks
+                async for text_chunk in llm_service.stream_response(
+                    text=transcribed_text,
+                    persona=persona,
+                    backstory=backstory,
+                    max_tokens=max_tokens or 150
+                ):
+                    full_text_response += text_chunk
+                    text_buffer += text_chunk
+                    
+                    # Generate audio when we have enough text
+                    # Much larger chunks (40 chars) for very smooth audio with minimal stopping
+                    # Also trigger on punctuation for natural breaks, but with larger buffers
+                    should_generate_audio = (
+                        len(text_buffer) >= 40 or  # Much larger chunks for very smooth playback
+                        (text_buffer.endswith('.') and len(text_buffer) >= 30) or
+                        (text_buffer.endswith('!') and len(text_buffer) >= 30) or
+                        (text_buffer.endswith('?') and len(text_buffer) >= 30) or
+                        (text_buffer.endswith(',') and len(text_buffer) >= 30) or  # Commas need much more text
+                        (text_buffer.endswith(' ') and len(text_buffer) >= 40)  # Spaces need much more text
+                    )
+                    
+                    if should_generate_audio and len(text_buffer.strip()) > 0:
+                        # Generate audio for buffered text
+                        text_to_convert = text_buffer.strip()
+                        text_buffer = ""  # Clear buffer
+                        
+                        # Stream audio for this text chunk immediately
+                        async for audio_chunk in tts_service.generate_audio_stream(text_to_convert):
+                            yield audio_chunk
+                
+                # Generate audio for any remaining buffered text
+                if text_buffer.strip():
+                    async for audio_chunk in tts_service.generate_audio_stream(text_buffer.strip()):
+                        yield audio_chunk
+                
             except Exception as e:
-                logger.error(f"Error in audio stream: {e}", exc_info=True)
+                logger.error(f"Error in streaming audio generation: {e}", exc_info=True)
                 raise
         
-        # Return audio as streaming response
+        # Encode Unicode text for HTTP headers (headers must be latin-1 compatible)
+        # Use base64 encoding to safely transmit Unicode text in headers
+        import base64
+        
+        # Encode transcription (available immediately)
+        transcription_b64 = base64.b64encode(transcribed_text.encode('utf-8')).decode('latin-1')
+        
+        # Note: full_text_response accumulates during streaming, can't be in headers initially
+        # The client will receive the full response through the audio stream headers or separately
         return StreamingResponse(
             generate_audio_stream(),
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "attachment; filename=response.mp3",
-                "X-Transcription": transcribed_text,
-                "X-Text-Response": text_response,
+                "X-Transcription": transcription_b64,
+                "X-Transcription-Encoding": "base64",
+                "X-Text-Response-Encoding": "base64",
                 "X-Language-Code": transcription_result.get("language", "unknown"),
-                "X-Accel-Buffering": "no"  # Disable buffering for streaming
+                "X-Accel-Buffering": "no",  # Disable buffering for streaming
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Connection": "keep-alive"
             }
         )
         
@@ -301,7 +342,9 @@ async def text_to_speech(request: TTSRequest):
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "attachment; filename=tts.mp3",
-                "X-Accel-Buffering": "no"  # Disable buffering for streaming
+                "X-Accel-Buffering": "no",  # Disable buffering for streaming
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Connection": "keep-alive"
             }
         )
         
