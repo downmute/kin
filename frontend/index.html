@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kin - Voice Agent</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Kin</h1>
+            <p class="subtitle">Empathetic Voice Agent</p>
+        </header>
+
+        <main>
+            <div class="recording-section">
+                <button id="recordBtn" class="record-button">
+                    <span class="button-text">Click to Record</span>
+                    <span class="button-icon">🎤</span>
+                </button>
+                
+                <div id="status" class="status hidden"></div>
+                
+                <div id="recordingIndicator" class="recording-indicator hidden">
+                    <div class="pulse"></div>
+                    <span>Recording...</span>
+                </div>
+            </div>
+
+            <div id="transcription" class="transcription hidden">
+                <h3>Transcription:</h3>
+                <p id="transcriptionText"></p>
+            </div>
+
+            <div id="response" class="response hidden">
+                <h3>Response:</h3>
+                <p id="responseText"></p>
+                <audio id="audioPlayer" controls class="audio-player"></audio>
+            </div>
+
+            <div id="error" class="error hidden"></div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+
