@@ -21,6 +21,7 @@ class STTService:
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model = model
+        self.base_url = os.getenv("OPENROUTER_BASE_URL")
         
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not provided")

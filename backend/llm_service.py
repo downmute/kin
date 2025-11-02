@@ -12,20 +12,22 @@ import httpx
 class LLMService:
     """Service for interacting with LLM API."""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
         """
         Initialize LLM service.
         
         Args:
             api_key: API key
+            model: Model to use (default: "gpt-4o-mini")
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.model = model
         self.api_url = "https://api.openai.com/v1/chat/completions"
         
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not provided")
         
-        logging.info("LLM Service initialized")
+        logging.info(f"LLM Service initialized with model: {self.model}")
     
     def _build_system_prompt(self, persona: Optional[str] = None, backstory: Optional[str] = None) -> str:
         """
@@ -68,13 +70,14 @@ class LLMService:
             Text chunks from the LLM stream
         """
         headers = {
-            "Authorization": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         
         system_prompt = self._build_system_prompt(persona, backstory)
         
         llm_data = {
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
