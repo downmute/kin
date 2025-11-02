@@ -1,0 +1,1 @@
+Kin is an empathetic voice agent designed for the elderly. It assists caretakers with daily tasks, such as scheduling appointments, reminding users of medication, and providing assistance in emergencies.
