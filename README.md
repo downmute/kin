@@ -5,9 +5,9 @@ Kin is an empathetic voice agent designed for the elderly. It assists caretakers
 Kin uses a simplified pipeline: **Speech-to-Text → LLM Generation → Text-to-Speech**
 
 The backend is built with FastAPI and provides:
-- Speech-to-Text via ElevenLabs
+- Speech-to-Text via OpenAI Whisper
 - LLM integration via OpenAI
-- Text-to-Speech via ElevenLabs WebSocket API (real-time streaming)
+- Text-to-Speech via Fish Audio
 - RESTful API endpoints for chat, STT, and TTS
 
 The frontend is a simple web app that:
@@ -44,9 +44,8 @@ The frontend is a simple web app that:
 
 4. Create a `.env` file with your API keys:
    ```
-   ELEVENLABS_API_KEY=your_elevenlabs_api_key
-   ELEVENLABS_VOICE_ID=your_voice_id
-   ELEVENLABS_MODEL=eleven_turbo_v2_5
+   FISH_AUDIO_SECRET_KEY=your_fish_audio_secret_key
+   ENGLISH_FEMALE_SOFT=your_voice_reference_id
    OPENAI_API_KEY=your_openai_api_key
    PORT=8000
    HOST=0.0.0.0

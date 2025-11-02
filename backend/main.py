@@ -174,19 +174,28 @@ async def chat(
         
         logger.info(f"LLM response received: '{text_response[:50]}...'")
         
-        # Step 3: Generate TTS audio (now async with WebSocket)
+        # Step 3: Generate TTS audio (streaming)
         logger.info("Generating TTS audio...")
-        audio_data = await tts_service.generate_audio(text_response)
+        
+        async def generate_audio_stream():
+            """Generate audio stream chunks."""
+            try:
+                async for audio_chunk in tts_service.generate_audio_stream(text_response):
+                    yield audio_chunk
+            except Exception as e:
+                logger.error(f"Error in audio stream: {e}", exc_info=True)
+                raise
         
         # Return audio as streaming response
         return StreamingResponse(
-            iter([audio_data]),
+            generate_audio_stream(),
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "attachment; filename=response.mp3",
                 "X-Transcription": transcribed_text,
                 "X-Text-Response": text_response,
-                "X-Language-Code": transcription_result.get("language_code", "unknown")
+                "X-Language-Code": transcription_result.get("language", "unknown"),
+                "X-Accel-Buffering": "no"  # Disable buffering for streaming
             }
         )
         
@@ -243,13 +252,18 @@ async def speech_to_text(audio_file: UploadFile = File(...)):
         audio_data = await audio_file.read()
         audio_filename = audio_file.filename or "audio.mp3"
         
-        transcription_result = await stt_service.transcribe_audio(audio_data, audio_filename)
+        transcription_result = await stt_service.transcribe_audio(
+            audio_data,
+            audio_filename,
+            response_format="verbose_json"  # Get language and other metadata
+        )
         
         return JSONResponse(content={
             "message": "Transcription complete",
             "text": transcription_result["text"],
-            "language_code": transcription_result.get("language_code"),
-            "language_probability": transcription_result.get("language_probability"),
+            "language": transcription_result.get("language"),
+            "duration": transcription_result.get("duration"),
+            "segments": transcription_result.get("segments", []),
             "words": transcription_result.get("words", [])
         })
         
@@ -277,13 +291,17 @@ async def text_to_speech(request: TTSRequest):
         raise HTTPException(status_code=500, detail="TTS service not configured")
     
     try:
-        audio_data = await tts_service.generate_audio(request.text)
+        async def generate_audio_stream():
+            """Generate audio stream chunks."""
+            async for audio_chunk in tts_service.generate_audio_stream(request.text):
+                yield audio_chunk
         
         return StreamingResponse(
-            iter([audio_data]),
+            generate_audio_stream(),
             media_type="audio/mpeg",
             headers={
-                "Content-Disposition": "attachment; filename=tts.mp3"
+                "Content-Disposition": "attachment; filename=tts.mp3",
+                "X-Accel-Buffering": "no"  # Disable buffering for streaming
             }
         )
         

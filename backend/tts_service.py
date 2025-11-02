@@ -1,17 +1,13 @@
 """
-TTS Service - Text-to-Speech using ElevenLabs WebSocket API
+TTS Service - Text-to-Speech using Fish Audio API
 Extracted and simplified from the original LiveKit agent code.
-Uses WebSocket for real-time streaming audio generation.
 """
 import os
 import re
-import json
 import logging
 import asyncio
-import uuid
-import base64
 from typing import Optional, AsyncIterator
-import websockets
+from fish_audio_sdk import Session, TTSRequest
 
 # Emoji pattern for removal
 EMOJI_PATTERN = re.compile(
@@ -102,65 +98,45 @@ def strip_markdown(text: str) -> str:
 
 
 class TTSService:
-    """Text-to-Speech service using ElevenLabs WebSocket API."""
+    """Text-to-Speech service using Fish Audio API."""
     
     def __init__(
         self,
         api_key: Optional[str] = None,
         voice_id: Optional[str] = None,
-        model: Optional[str] = None,
-        voice_settings: Optional[dict] = None
+        format: str = "mp3"
     ):
         """
         Initialize TTS service.
         
         Args:
-            api_key: ElevenLabs API key (defaults to ELEVENLABS_API_KEY env var)
-            voice_id: Voice ID (defaults to ELEVENLABS_VOICE_ID env var)
-            model: Model ID (defaults to "eleven_turbo_v2_5" or ELEVENLABS_MODEL env var)
-            voice_settings: Voice settings dict with stability, similarity_boost, style, use_speaker_boost (optional)
+            api_key: Fish Audio secret key (defaults to FISH_AUDIO_SECRET_KEY env var)
+            voice_id: Voice reference ID (defaults to ENGLISH_FEMALE_SOFT env var)
+            format: Audio format (default: "mp3")
         """
-        self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY")
-        self.voice_id = voice_id or os.getenv("ELEVENLABS_VOICE_ID")
-        self.model = model or os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
+        self.api_key = api_key or os.getenv("FISH_AUDIO_SECRET_KEY")
+        self.voice_id = voice_id or os.getenv("ENGLISH_FEMALE_SOFT")
+        self.format = format
         
         if not self.api_key:
-            raise ValueError("ELEVENLABS_API_KEY not provided")
+            raise ValueError("FISH_AUDIO_SECRET_KEY not provided")
         if not self.voice_id:
-            raise ValueError("ELEVENLABS_VOICE_ID not provided")
+            raise ValueError("ENGLISH_FEMALE_SOFT not provided")
         
-        # Default voice settings if not provided
-        if voice_settings is None:
-            voice_settings = {
-                "stability": 0.5,
-                "similarity_boost": 0.75,
-                "style": 0.0,
-                "use_speaker_boost": True
-            }
-        
-        self.voice_settings = voice_settings
-        
-        # WebSocket URI for multi-context TTS
-        self.websocket_uri = (
-            f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/multi-stream-input"
-            f"?model_id={self.model}"
-        )
-        
-        logging.info(f"TTS Service initialized with voice ID: {self.voice_id}, model: {self.model}")
+        logging.info(f"TTS Service initialized with voice reference ID: {self.voice_id}, format: {self.format}")
     
     async def generate_audio_stream(
         self,
         text: str,
-        model: Optional[str] = None,
-        voice_settings: Optional[dict] = None
+        format: Optional[str] = None
     ) -> AsyncIterator[bytes]:
         """
-        Generate audio from text using ElevenLabs WebSocket API (streaming).
+        Generate audio from text using Fish Audio API (streaming).
+        Yields audio chunks as they are generated.
         
         Args:
             text: Text to convert to speech
-            model: Model ID (optional, uses instance default if not provided)
-            voice_settings: Voice settings dict (optional, uses instance default if not provided)
+            format: Audio format (optional, uses instance default if not provided)
         
         Yields:
             Audio chunks as bytes
@@ -177,109 +153,87 @@ class TTSService:
         
         logging.info(f"Generating TTS stream for text: '{cleaned_text[:50]}...'")
         
-        # Use provided model or instance default
-        model_id = model or self.model
-        websocket_uri = (
-            f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/multi-stream-input"
-            f"?model_id={model_id}"
-        )
-        
-        # Use provided voice settings or instance default
-        settings = voice_settings or self.voice_settings
-        
-        # Generate unique context ID for this request
-        context_id = str(uuid.uuid4())
+        # Use provided format or instance default
+        audio_format = format or self.format
         
         try:
-            async with websockets.connect(
-                websocket_uri,
-                max_size=16 * 1024 * 1024,  # 16MB max message size
-                additional_headers={"xi-api-key": self.api_key}
-            ) as websocket:
-                # Send initial message with text and voice settings
-                initial_message = {
-                    "text": cleaned_text,
-                    "context_id": context_id,
-                    "voice_settings": {
-                        "stability": settings.get("stability", 0.5),
-                        "similarity_boost": settings.get("similarity_boost", 0.75),
-                        "style": settings.get("style", 0.0),
-                        "use_speaker_boost": settings.get("use_speaker_boost", True)
-                    }
-                }
-                
-                await websocket.send(json.dumps(initial_message))
-                
-                # Flush to ensure generation
-                await websocket.send(json.dumps({
-                    "context_id": context_id,
-                    "flush": True
-                }))
-                
-                # Receive audio chunks
-                async for message in websocket:
+            # Use a queue to bridge between sync iterator and async generator
+            chunk_queue = asyncio.Queue(maxsize=20)  # Buffer chunks
+            exception_holder = [None]
+            
+            # Start streaming in background thread
+            loop = asyncio.get_event_loop()
+            import threading
+            
+            # Store loop reference for thread
+            def _stream_chunks_to_queue_with_loop():
+                """Wrapper that captures the event loop."""
+                try:
+                    session = Session(self.api_key)
+                    
+                    tts_request = TTSRequest(
+                        text=cleaned_text,
+                        reference_id=self.voice_id,
+                        format=audio_format
+                    )
+                    
+                    # Stream chunks to queue using thread-safe put
+                    for chunk in session.tts(tts_request):
+                        if chunk:
+                            # Use run_coroutine_threadsafe to put from background thread
+                            future = asyncio.run_coroutine_threadsafe(
+                                chunk_queue.put(chunk),
+                                loop
+                            )
+                            # Wait for put to complete (prevents queue overflow)
+                            try:
+                                future.result(timeout=0.1)
+                            except:
+                                pass  # If timeout, chunk will be dropped or queue full
+                    
+                    # Signal completion
+                    asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
+                        
+                except Exception as e:
+                    exception_holder[0] = e
                     try:
-                        # Messages from ElevenLabs are JSON strings
-                        if isinstance(message, str):
-                            data = json.loads(message)
-                            
-                            # Check if this is audio data (base64 encoded)
-                            if "audio" in data:
-                                try:
-                                    audio_bytes = base64.b64decode(data["audio"])
-                                    yield audio_bytes
-                                except Exception as e:
-                                    logging.error(f"Error decoding base64 audio: {e}")
-                                    continue
-                            
-                            # Check if generation is complete
-                            if data.get("is_final"):
-                                logging.info(f"TTS generation complete for context '{context_id}'")
-                                break
-                            
-                            # Check for errors
-                            if "error" in data:
-                                error_msg = data.get("error", {}).get("message", "Unknown error")
-                                logging.error(f"TTS WebSocket error: {error_msg}")
-                                raise ValueError(f"TTS generation error: {error_msg}")
-                        else:
-                            # Binary message (shouldn't happen but handle it)
-                            logging.warning(f"Received binary message: {len(message)} bytes")
-                            if isinstance(message, bytes):
-                                yield message
-                                
-                    except json.JSONDecodeError as e:
-                        logging.warning(f"Error parsing JSON message: {e}, message type: {type(message)}")
-                        continue
-                    except Exception as e:
-                        logging.error(f"Error processing WebSocket message: {e}")
-                        raise
+                        asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
+                    except:
+                        pass
+            
+            thread = threading.Thread(target=_stream_chunks_to_queue_with_loop, daemon=True)
+            thread.start()
+            
+            # Yield chunks from queue as they arrive
+            while True:
+                chunk = await chunk_queue.get()
                 
-                # Close the context
-                await websocket.send(json.dumps({
-                    "context_id": context_id,
-                    "close_context": True
-                }))
+                if exception_holder[0]:
+                    raise exception_holder[0]
                 
+                if chunk is None:  # Signal to stop
+                    break
+                
+                yield chunk
+                    
         except Exception as e:
             logging.error(f"Error generating TTS stream: {e}")
             raise
     
-    async def generate_audio(self, text: str, model: Optional[str] = None, voice_settings: Optional[dict] = None) -> bytes:
+    async def generate_audio(self, text: str, format: Optional[str] = None) -> bytes:
         """
-        Generate audio from text using ElevenLabs WebSocket API (non-streaming).
+        Generate audio from text using Fish Audio API (non-streaming).
         Collects all audio chunks and returns as complete bytes.
         
         Args:
             text: Text to convert to speech
-            model: Model ID (optional, uses instance default if not provided)
-            voice_settings: Voice settings dict (optional, uses instance default if not provided)
+            format: Audio format (optional, uses instance default if not provided)
         
         Returns:
             Complete audio data as bytes
         """
         audio_chunks = []
-        async for chunk in self.generate_audio_stream(text, model, voice_settings):
+        async for chunk in self.generate_audio_stream(text, format):
             audio_chunks.append(chunk)
         
         audio_data = b''.join(audio_chunks)
